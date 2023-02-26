@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Http/2 video streaming</title>
+  <style>
+    .video-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, 300px);
+      grid-auto-rows: 300px;
+      gap: 10px;
+    }
+    video {
+      width: 100%;      
+      height: 100%;
+      object-fit: cover;
+    }
+  </style>  
+  <script>
+    const streamId = Date.now()
+
+    async function wait(milliseconds) {
+      return new Promise((resolve) => setTimeout(resolve, milliseconds));
+    }
+
+    /**
+     * @type {MediaRecorder | null}
+     */
+    let streamRecorder = null
+    /**
+     * @type {MediaSource | null}
+     */
+    let captureSource = null
+
+    /**
+     * @type {HTMLVideoElement | null}  
+     */
+    let streamingVideo = null
+    /**
+     * @type {HTMLVideoElement | null}  
+     */
+    let capturingVideo = null
+
+    /**
+     * @type {AbortController | null}
+     */
+    let streamAbort = null
+    /**
+     * @type {AbortController | null}
+     */
+    let captureAbort = null
+
+    async function stream() {
+      streamCancel()
+
+      const videoGrid = document.getElementById('streaming-video-grid')
+    
+      streamingVideo = document.createElement('video')
+      streamingVideo.muted = true      
+
+      const mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: true
+      })
+
+      streamRecorder = new MediaRecorder(mediaStream, { mimeType: 'video/webm; codecs=vp9' })
+
+      addVideoStream(videoGrid, streamingVideo, mediaStream)
+
+      const transformStream = new TransformStream({
+        async transform(chunk, controller) {
+          const data = await chunk;
+          
+          if (data === null) {
+            controller.terminate();
+          } else {
+            controller.enqueue(new Uint8Array(data));
+          }          
+        }
+      });
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          streamRecorder.ondataavailable = event => controller.enqueue(event.data.arrayBuffer())
+          streamRecorder.onstop = () => controller.close()
+          streamRecorder.onerror = event => controller.error(new Error('The streamRecorder error'))
+        }
+      }).pipeThrough(transformStream)
+
+      streamAbort = new AbortController()
+
+      streamRecorder.start(1000)
+
+      try {
+        const resp = await fetch(
+          'https://localhost:3000/stream', {
+            method: 'POST',
+            duplex: 'half',
+            headers: {
+              'StreamId': streamId
+            },
+            signal: streamAbort.signal,
+            body: stream
+          }
+        )
+      } catch(error) {
+        console.error('Streaming error:', error)
+      }
+
+      console.log('Streaming done!')
+
+      streamCancel()
+    }
+
+    /**
+     * @param {HTMLDivElement} videoGrid
+     * @param {HTMLVideoElement} video
+     * @param {MediaStream} mediaStream
+     */
+    function addVideoStream(videoGrid, video, mediaStream) {
+      video.srcObject = mediaStream
+      video.onloadedmetadata = () => {
+        video.play()
+      }      
+      videoGrid.append(video)
+    }
+
+    function streamCancel() {
+      streamRecorder?.stop()
+      streamRecorder = null
+
+      streamAbort?.abort()
+      streamAbort = null
+
+      streamingVideo?.srcObject.getTracks().forEach(track => track.stop())
+      streamingVideo?.remove()
+      streamingVideo = null
+    }
+
+    async function capture() {
+      captureCancel()
+
+      const videoGrid = document.getElementById('capturing-video-grid')
+    
+      capturingVideo = document.createElement('video')
+      capturingVideo.muted = true
+
+      const mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: true
+      })      
+
+      addVideoStream(videoGrid, capturingVideo, mediaStream) 
+      
+      captureAbort = new AbortController()
+
+      try {
+        const resp = await fetch(
+          'https://localhost:3000/capture', {
+            method: 'POST',
+            duplex: 'half',
+            headers: {
+              'StreamId': streamId
+            },
+            signal: captureAbort.signal
+          }
+        )
+
+        const reader = resp.body.getReader()
+
+        while(true) {
+          const { value, done } = await reader.read()
+
+          if(done) {
+            break
+          }
+
+          // console.log(value)
+        }
+      } catch(error) {
+        console.error('Capturing error:', error)
+      }
+
+      console.log('Capture done!')
+
+      captureCancel()
+    }
+
+    /**
+     * @param {HTMLDivElement} videoGrid
+     * @param {HTMLVideoElement} video
+     * @param {MediaSource} mediaSource
+     */
+    function addVideoSource(videoGrid, video, mediaSource) {
+      video.src = URL.createObjectURL(mediaSource)
+      video.play()
+      videoGrid.append(video)
+    }    
+
+    function captureCancel() {
+      if(captureSource?.readyState === 'open') {
+        captureSource?.endOfStream()
+      }
+      captureSource = null
+
+      captureAbort?.abort()
+      captureAbort = null
+
+      capturingVideo?.srcObject.getTracks().forEach(track => track.stop())
+      capturingVideo?.remove()
+      capturingVideo = null
+    }
+  </script>
+</head>
+<body>
+  <div class="video-grid" id="streaming-video-grid"></div> 
+  <div style="padding: 10px 0;">
+    <button onclick="stream()">stream</button>
+    &nbsp;&nbsp;&nbsp;
+    <button onclick="streamCancel()">cancel</button>
+  </div>
+  <div style="padding: 10px 0;">
+    <button onclick="capture()">capture</button>  
+    &nbsp;&nbsp;&nbsp;
+    <button onclick="captureCancel()">cancel</button>
+  </div>
+  <div class="video-grid" id="capturing-video-grid"></div>
+</body>
+</html>
